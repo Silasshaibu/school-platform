@@ -14,7 +14,9 @@ export async function createSession(s: Session) {
   const token = await new SignJWT(s).setProtectedHeader({ alg: "HS256" }).setExpirationTime("7d").sign(key);
   (await cookies()).set("session", token, {
     httpOnly: true, sameSite: "lax", path: "/",
-    secure: process.env.NODE_ENV === "production", maxAge: 60 * 60 * 24 * 7,
+    // Secure cookies require HTTPS; local production testing runs over plain HTTP,
+    // so opt in explicitly with COOKIE_SECURE=true once served behind HTTPS.
+    secure: process.env.COOKIE_SECURE === "true", maxAge: 60 * 60 * 24 * 7,
   });
 }
 
@@ -29,9 +31,12 @@ export async function requireRole(...roles: Role[]) {
   const s = await getSession();
   if (!s) throw new Response("Unauthorized", { status: 401 });
   const school = await getSchool();
-  const ok = s.role === "SUPER_ADMIN" || (school && s.schoolId === school.id);
-  if (!ok || (s.role !== "SUPER_ADMIN" && !roles.includes(s.role)))
-    throw new Response("Forbidden", { status: 403 });
+  // Tenant routes need a resolved, active school; without one even SUPER_ADMIN
+  // gets a clean 403 instead of crashing later on `school!.id`. Platform-owner
+  // endpoints must use requireSuperAdmin() (or impersonation, when built).
+  if (!school) throw new Response("Forbidden", { status: 403 });
+  const ok = s.role === "SUPER_ADMIN" || (s.schoolId === school.id && roles.includes(s.role));
+  if (!ok) throw new Response("Forbidden", { status: 403 });
   return { session: s, school };
 }
 
