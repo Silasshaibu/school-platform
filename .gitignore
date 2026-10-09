@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+
+# Next.js build artifacts
+.next/
+out/
+
+# TypeScript build info
+tsconfig.tsbuildinfo
+
+# Environment files (never commit secrets)
+.env
+.env.*
+!.env.example
+
+# Scratch/debug files
+dbg*.ts
+
+# Logs & local DB artifacts
+*.log
+npm-debug.log*
+dev.db
+data/
+
+# OS / editor
+.DS_Store
+.vercel
