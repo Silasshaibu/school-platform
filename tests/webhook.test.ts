@@ -4,12 +4,12 @@
  */
 import { createHmac } from "crypto";
 import {
-  tx, test, assert, assertEqual, rebuildSchema, summary, truncateAll, TEST_URL,
+  tx, test, assert, assertEqual, rebuildSchema, summary, truncateAll, DEV_URL, TEST_URL,
 } from "./harness";
 
 async function main() {
   if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL is required");
-  rebuildSchema(process.env.DATABASE_URL, TEST_URL!);
+  rebuildSchema(DEV_URL, TEST_URL);
 
   const { POST } = await import("@/app/api/webhooks/paystack/route");
 

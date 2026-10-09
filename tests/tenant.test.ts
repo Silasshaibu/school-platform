@@ -3,12 +3,11 @@
  * write with the school id, across all operation types.
  */
 import {
-  tx, test, assert, assertEqual, rebuildSchema, summary, truncateAll, TEST_URL,
+  tx, test, assert, assertEqual, rebuildSchema, summary, truncateAll, DEV_URL, TEST_URL,
 } from "./harness";
 
 async function main() {
-  if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL (dev DB, source of schema) is required");
-  rebuildSchema(process.env.DATABASE_URL, TEST_URL!);
+  rebuildSchema(DEV_URL, TEST_URL);
 
   // Import AFTER env + shims are in place (lib/db reads DATABASE_URL at import).
   const { tenantDb } = await import("@/lib/db");
@@ -19,7 +18,7 @@ async function main() {
   const dbB = tenantDb(b.id);
 
   await test("create stamps schoolId automatically", async () => {
-    const s = await dbA.subject.create({ data: { name: "Maths" } });
+    const s = await dbA.subject.create({ data: { schoolId: a.id, name: "Maths" } });
     assertEqual(s.schoolId, a.id, "stamped on returned row");
     const raw = await tx.subject.findUniqueOrThrow({ where: { id: s.id } });
     assertEqual(raw.schoolId, a.id, "stamped in the database");
@@ -33,7 +32,7 @@ async function main() {
   });
 
   await test("findMany is scoped to the tenant", async () => {
-    await dbB.subject.create({ data: { name: "Biology" } });
+    await dbB.subject.create({ data: { schoolId: b.id, name: "Biology" } });
     const listA = await dbA.subject.findMany();
     const listB = await dbB.subject.findMany();
     assert(listA.every((s) => s.schoolId === a.id), "A sees only A's subjects");
@@ -61,7 +60,7 @@ async function main() {
 
   await test("interactive $transaction carries the extension", async () => {
     await dbA.$transaction(async (t) => {
-      const s = await t.subject.create({ data: { name: "Civic" } });
+      const s = await t.subject.create({ data: { schoolId: a.id, name: "Civic" } });
       assertEqual(s.schoolId, a.id, "create inside tx is stamped");
       const n = await t.subject.count();
       assertEqual(n, 1, "reads inside tx are scoped");
@@ -73,14 +72,14 @@ async function main() {
   await test("array-form $transaction carries the extension", async () => {
     await Promise.all([]); // keep signature simple; run real array form:
     const [made] = await dbA.$transaction([
-      dbA.feeItem.create({ data: { name: "Sports" } }),
+      dbA.feeItem.create({ data: { schoolId: a.id, name: "Sports" } }),
       dbA.feeItem.count(),
     ]);
     assertEqual(made.schoolId, a.id, "create in array tx is stamped");
   });
 
   await test("aggregate/groupBy respect scope", async () => {
-    await dbB.feeItem.create({ data: { name: "B-only item" } });
+    await dbB.feeItem.create({ data: { schoolId: b.id, name: "B-only item" } });
     const max = await dbA.feeItem.aggregate({ _count: { id: true } });
     assertEqual(max._count.id, 1, "A counts only its own fee items");
   });
@@ -91,9 +90,10 @@ async function main() {
   });
 
   await test("cross-tenant nested read via relation returns nothing", async () => {
-    const cls = await dbA.schoolClass.create({ data: { name: "P1", level: 1 } });
+    const cls = await dbA.schoolClass.create({ data: { schoolId: a.id, name: "P1", level: 1 } });
     await dbA.student.create({
       data: {
+        schoolId: a.id,
         admissionNo: "A/1", firstName: "Ann", lastName: "A", dob: new Date("2019-01-01"),
         gender: "F", classId: cls.id,
       },

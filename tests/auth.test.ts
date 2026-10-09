@@ -3,12 +3,12 @@
  * crash path from CLAUDE.md "things most likely to be wrong" #2), and the
  * cookie Secure-flag fix for local HTTP.
  */
-import { tx, test, assert, assertEqual, rebuildSchema, summary, truncateAll, TEST_URL, setSchoolSlug, getSessionCookie, logout } from "./harness";
+import { tx, test, assert, assertEqual, rebuildSchema, summary, truncateAll, DEV_URL, TEST_URL, setSchoolSlug, getSessionCookie, logout } from "./harness";
 import { make } from "./fixtures";
 
 async function main() {
   if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL is required");
-  rebuildSchema(process.env.DATABASE_URL, TEST_URL!);
+  rebuildSchema(DEV_URL, TEST_URL);
 
   const f = await make();
   const { POST: LOGIN } = await import("@/app/api/auth/login/route");

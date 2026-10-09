@@ -2,12 +2,12 @@
  * Admissions stage machine (lib/admissions.ts) plus the PATCH endpoint and the
  * enrolment transaction (ACCEPTED -> Student + Guardian + link).
  */
-import { tx, test, assert, assertEqual, rebuildSchema, summary, truncateAll, TEST_URL, setSchoolSlug } from "./harness";
+import { tx, test, assert, assertEqual, rebuildSchema, summary, truncateAll, DEV_URL, TEST_URL, setSchoolSlug } from "./harness";
 import { make } from "./fixtures";
 
 async function main() {
   if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL is required");
-  rebuildSchema(process.env.DATABASE_URL, TEST_URL!);
+  rebuildSchema(DEV_URL, TEST_URL);
 
   const f = await make();
   const { canMove, TRANSITIONS } = await import("@/lib/admissions");

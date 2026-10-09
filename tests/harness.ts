@@ -10,10 +10,30 @@
  * shimmed so getSchool()/cookies() work outside the Next.js runtime.
  */
 import { execSync } from "child_process";
+import { existsSync, readFileSync } from "fs";
 import { PrismaClient } from "@prisma/client";
 
-export const TEST_URL = process.env.TEST_DATABASE_URL;
-if (!TEST_URL) throw new Error("TEST_DATABASE_URL is required (point it at a scratch database!)");
+/* dotenv-lite: load .env.local then .env without overriding real env vars. */
+for (const file of [".env.local", ".env"]) {
+  if (!existsSync(file)) continue;
+  for (const line of readFileSync(file, "utf8").split("\n")) {
+    const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
+    if (!m || line.trim().startsWith("#")) continue;
+    if (process.env[m[1]] !== undefined) continue;
+    process.env[m[1]] = m[2].replace(/^["']|["']$/g, "");
+  }
+}
+
+/**
+ * The schema source DB and the scratch test DB. Defaults to two databases in
+ * one local Postgres so `npm test` works out of the box; override with
+ * DATABASE_URL / TEST_DATABASE_URL (e.g. Neon dev + Neon test branches).
+ */
+export const DEV_URL =
+  process.env.DATABASE_URL ?? "postgresql://postgres:postgres@localhost:5432/school?schema=public";
+export const TEST_URL =
+  process.env.TEST_DATABASE_URL ?? "postgresql://postgres:postgres@localhost:5432/school_test?schema=public";
+process.env.DATABASE_URL = DEV_URL; // lib/db must point at the same DB the tests seed
 
 process.env.AUTH_SECRET ??= "test-secret-0123456789abcdef0123456789abcdef";
 process.env.ROOT_DOMAIN ??= "localhost:3000";
@@ -112,7 +132,8 @@ export function rebuildSchema(devUrl: string, testUrl: string) {
 
   const fkOut = execSync(
     `psql "${pgUrl(devUrl)}" -AtF'|' -c "
-      SELECT rel.relname, con.conname, att.attname, frel.relname, fatt.attname
+      SELECT rel.relname, con.conname, att.attname, frel.relname, fatt.attname,
+             con.confdeltype
       FROM pg_constraint con
       JOIN pg_class rel ON rel.oid = con.conrelid
       JOIN pg_class frel ON frel.oid = con.confrelid
@@ -130,33 +151,70 @@ export function rebuildSchema(devUrl: string, testUrl: string) {
     .map((l) => l.split("|"));
 
   // Group composite FK columns by (table, constraint name).
-  const fkMap = new Map<string, { table: string; ref: string; cols: string[]; refCols: string[] }>();
-  for (const [table, conname, col, reftable, refcol] of fkOut) {
+  const fkMap = new Map<string, { table: string; ref: string; cols: string[]; refCols: string[]; del: string }>();
+  for (const [table, conname, col, reftable, refcol, del] of fkOut) {
     const key = `${table}.${conname}`;
-    const e = fkMap.get(key) ?? { table, ref: reftable, cols: [], refCols: [] };
+    const e = fkMap.get(key) ?? { table, ref: reftable, cols: [], refCols: [], del };
     e.cols.push(col);
     e.refCols.push(refcol);
     fkMap.set(key, e);
   }
 
-  const stmts: string[] = ["SET client_min_messages TO warning;", "BEGIN;"];
-  for (const t of byTable.keys()) stmts.push(`DROP TABLE IF EXISTS "${t}" CASCADE;`);
+  // Unique indexes (from @@unique / @unique in the Prisma schema). Without these
+  // the test DB would silently allow duplicate emails/slugs and isolation tests
+  // that rely on unique-violation errors would never fire.
+  const idxOut = execSync(
+    `psql "${pgUrl(devUrl)}" -AtF'|' -c "
+      SELECT tablename, indexname, indexdef
+      FROM pg_indexes
+      WHERE schemaname = 'public' AND indexdef ILIKE '%UNIQUE%'
+      ORDER BY tablename, indexname"`,
+    { encoding: "utf8" },
+  )
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((l) => l.split("|"));
+
+  // Primary keys must exist before any FK can reference them — Postgres has no
+  // deferred constraint checking within a single transaction, so we split the
+  // rebuild into sequential psql batches:
+  //   1. drop everything  2. create enums  3. create tables + PKs
+  //   4. unique indexes (incl. _key constraints)  5. foreign keys
+  const drops: string[] = ["SET client_min_messages TO warning;"];
+  for (const t of byTable.keys()) drops.push(`DROP TABLE IF EXISTS "${t}" CASCADE;`);
+  for (const name of enums.keys()) drops.push(`DROP TYPE IF EXISTS "${name}" CASCADE;`);
+  drops.push("DROP TABLE IF EXISTS _prisma_migrations CASCADE;");
+
+  const types: string[] = [];
   for (const [name, labels] of enums) {
-    stmts.push(`DROP TYPE IF EXISTS "${name}" CASCADE;`);
-    stmts.push(`CREATE TYPE "${name}" AS ENUM (${labels.join(", ")});`);
+    types.push(`CREATE TYPE "${name}" AS ENUM (${labels.join(", ")});`);
   }
-  for (const [t, defs] of byTable) stmts.push(`CREATE TABLE "${t}" (\n  ${defs.join(",\n  ")}\n);`);
+
+  const tables: string[] = [];
+  for (const [t, defs] of byTable) tables.push(`CREATE TABLE "${t}" (\n  ${defs.join(",\n  ")}\n);`);
+
+  const pks: string[] = [];
+  const uniques: string[] = [];
+  for (const [, indexname, indexdef] of idxOut) {
+    (indexname.endsWith("_pkey") ? pks : uniques).push(`${indexdef};`);
+  }
+
+  const DEL: Record<string, string> = { a: "NO ACTION", r: "RESTRICT", c: "CASCADE", n: "SET NULL", d: "SET DEFAULT" };
+  const fks: string[] = [];
   for (const [key, e] of fkMap) {
     const name = key.slice(key.indexOf(".") + 1);
-    stmts.push(
-      `ALTER TABLE "${e.table}" ADD CONSTRAINT "${name}" FOREIGN KEY (${e.cols.map((c) => `"${c}"`).join(", ")}) REFERENCES "${e.ref}" (${e.refCols.map((c) => `"${c}"`).join(", ")});`,
+    fks.push(
+      `ALTER TABLE "${e.table}" ADD CONSTRAINT "${name}" FOREIGN KEY (${e.cols.map((c) => `"${c}"`).join(", ")}) REFERENCES "${e.ref}" (${e.refCols.map((c) => `"${c}"`).join(", ")}) ON DELETE ${DEL[e.del] ?? "NO ACTION"} ON UPDATE CASCADE;`,
     );
   }
-  stmts.push("COMMIT;");
 
-  execSync(`psql "${pgUrl(testUrl)}" -v ON_ERROR_STOP=1 -q <<'SQL'\n${stmts.join("\n")}\nSQL`, {
-    stdio: "inherit",
-  });
+  for (const batch of [drops, types, tables, pks, uniques, fks]) {
+    if (batch.length === 0) continue;
+    execSync(`psql "${pgUrl(testUrl)}" -v ON_ERROR_STOP=1 -q <<'SQL'\n${batch.join("\n")}\nSQL`, {
+      stdio: "inherit",
+    });
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -166,7 +224,7 @@ let passed = 0;
 let failed = 0;
 const failures: string[] = [];
 
-export async function test(name: string, fn: () => Promise<void>) {
+export async function test(name: string, fn: () => void | Promise<void>) {
   try {
     await fn();
     passed++;
